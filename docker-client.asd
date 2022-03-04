@@ -7,6 +7,7 @@
                "anaphora"
                "metabang-bind"
                "yason"
+               "flexi-streams"
                "local-time"
                "salmon"
                "trivia"
