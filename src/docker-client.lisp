@@ -11,7 +11,10 @@
            :stop-container :stdin-socket
            :pause-container :unpause-container
            :remove-container
-           :create-container))
+           :create-container
+           :connect-docker-socket
+           :docker-stream
+           :close-docker-socket))
 
 (in-package :docker-client)
 
@@ -27,6 +30,23 @@
 (defclass http-response ()
   ((http-status :reader http-status :initarg :http-status)
    (http-headers :reader http-headers :initarg :http-headers)))
+
+(defclass docker-socket ()
+  ((docker-connection :reader socket-connection :initarg :docker-connection)
+   (docker-stream :reader docker-stream :initarg :docker-stream)))
+
+(defun connect-docker-socket ()
+  (handler-case (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+                  (handler-case (progn 
+                                  (sb-bsd-sockets:socket-connect socket "/var/run/docker.sock")
+                                  (let ((stream (sb-bsd-sockets:socket-make-stream socket :input t :output t)))
+                                    (right (make-instance 'docker-socket :docker-connection socket
+                                                    :docker-stream stream))))
+                    (error (e) (left (format nil "Error while connecting docker socket ~a" e)))))
+    (error (e) (left (format nil "Error while constructing docker socket ~a" e)))))
+
+(defmethod close-docker-socket ((socket docker-socket))
+  (close (docker-stream socket)))
 
 (defun parse-status (status-line)
   (match status-line
@@ -207,7 +227,6 @@
       (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
         (unwind-protect 
              (let ((body (format nil *create-json* image-name)))
-               (format t "JSON BODY: ~a~%" body)
                (format (socket-stream sock)
                        "POST /v1.41/containers/create?name=~a HTTP/1.0~a~aContent-Length: ~a~a~aContent-Type: application/json~a~a~a~a~a"
                        identifier
