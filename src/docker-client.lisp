@@ -10,7 +10,8 @@
            :container-stdin :container-stdout :container-stderr 
            :stop-container :stdin-socket
            :pause-container :unpause-container
-           :remove-container))
+           :remove-container
+           :create-container))
 
 (in-package :docker-client)
 
@@ -198,6 +199,38 @@
                         (read-http-response (socket-stream sock))))
           (socket-close sock)))
     (error (e) (left (format nil "Failed to remove docker container: ~a" e)))))
+
+(defparameter *create-json* "{\"Hostname\":\"\",\"Domainname\":\"\",\"User\":\"\",\"AttachStdin\":false,\"AttachStdout\":false,\"AttachStderr\":false,\"Tty\":false,\"OpenStdin\":true,\"StdinOnce\":false,\"Env\":[],\"Image\":\"~a\",\"Labels\":{},\"Volumes\":{},\"WorkingDir\":\"\",\"NetworkDisabled\":false,\"MacAddress\":\"12:34:56:78:9a:bc\",\"ExposedPorts\":{},\"StopSignal\":\"SIGTERM\",\"StopTimeout\":10,\"HostConfig\":{},\"NetworkingConfig\":{}}")
+
+(defmethod create-container (identifier image-name)
+  (handler-case 
+      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
+        (unwind-protect 
+             (let ((body (format nil *create-json* image-name)))
+               (format t "JSON BODY: ~a~%" body)
+               (format (socket-stream sock)
+                       "POST /v1.41/containers/create?name=~a HTTP/1.0~a~aContent-Length: ~a~a~aContent-Type: application/json~a~a~a~a~a"
+                       identifier
+                       #\return #\newline (length body) #\return #\newline #\return #\newline #\return #\newline body)
+               (force-output (socket-stream sock))
+               (flatmap (lambda (response) 
+                          (cond ((= (floor (code (http-status response)) 100) 5)
+                                 (left (format nil "Error from docker daemon: ~a ~a" 
+                                               (code (http-status response))
+                                               (reason-phrase (http-status response)))))
+                                ((= (floor (code (http-status response)) 100) 4)
+                                 (left (format nil "Client error: ~a ~a"
+                                               (code (http-status response))
+                                               (reason-phrase (http-status response)))))
+                                ((= (code (http-status response)) 201)
+                                 (right "Created container"))
+                                (t (left (format nil
+                                                 "Unexpected response from docker daemon: ~a ~a" 
+                                                 (code (http-status response))
+                                                 (reason-phrase (http-status response)))))))
+                        (read-http-response (socket-stream sock))))
+          (socket-close sock)))
+    (error (e) (left (format nil "Failed to create docker container: ~a" e)))))
 
 (defmethod start-container (identifier)
   (handler-case 
