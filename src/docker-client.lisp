@@ -8,7 +8,7 @@
   (:export :start-container :attach-container 
            :detach :attach-socket :close-connection
            :container-stdin :container-stdout :container-stderr 
-           :get-stdin :get-stderr :get-stdout))
+           :stop-container :stdin-socket))
 
 (in-package :docker-client)
 
@@ -95,8 +95,25 @@
    (container-stdout :reader container-stdout :initarg :container-stdout)
    (container-stderr :reader container-stderr :initarg :container-stderr)))
 
+(defclass stdin-writer (sb-gray:fundamental-character-output-stream)
+  ((stdin-socket :reader stdin-socket :initarg :stdin-socket)
+   (stdin-stream :reader stdin-stream :initarg :stdin-stream)))
+
+(defmethod sb-gray:stream-write-char ((stream stdin-writer) c)
+  (write-char c (stdin-stream stream)))
+
+(defmethod sb-gray:stream-finish-output ((stream stdin-writer))
+  (finish-output (stdin-stream stream)))
+
+(defmethod sb-gray:stream-force-output ((stream stdin-writer))
+  (force-output (stdin-stream stream)))
+
+(defmethod close ((stream stdin-writer) &key abort) 
+  (declare (ignore abort))
+  (socket-close (stdin-socket stream)))
+
 (defmethod detach ((attachment attached-container))
-  (socket-close (container-stdin attachment))
+  (close (container-stdin attachment))
   (close (container-stdout attachment))
   (close (container-stderr attachment)))
 
@@ -127,6 +144,34 @@
                         (read-http-response (socket-stream sock))))
           (socket-close sock)))
     (error (e) (left (format nil "Failed to start docker container: ~a" e)))))
+
+(defmethod stop-container (identifier)
+  (handler-case 
+      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
+        (unwind-protect 
+             (progn 
+               (format (socket-stream sock)
+                       "POST /containers/~a/stop HTTP/1.0~a~a~a~a"
+                       identifier #\return #\newline #\return #\newline)
+               (force-output (socket-stream sock))
+               (flatmap (lambda (response) 
+                          (cond ((= (code (http-status response)) 500)
+                                 (left (format nil "Error from docker daemon: 500 ~a" 
+                                               (reason-phrase response))))
+                                ((= (code (http-status response)) 404)
+                                 (left (format nil "Container does not exist: 404 ~a"
+                                               (reason-phrase response))))
+                                ((= (code (http-status response)) 304)
+                                 (right "Container already stopped"))
+                                ((= (code (http-status response)) 204)
+                                 (right "Stopped container"))
+                                (t (left (format nil
+                                                 "Unexpected response from docker daemon: ~a ~a" 
+                                                 (code (http-status response))
+                                                 (reason-phrase response))))))
+                        (read-http-response (socket-stream sock))))
+          (socket-close sock)))
+    (error (e) (left (format nil "Failed to stop docker container: ~a" e)))))
 
 (defun attach-socket (identifier attach-type)
   (let ((attach-query (case attach-type
@@ -172,7 +217,11 @@
                        (yield (make-instance 
                                'attached-container 
                                :identifier identifier
-                               :container-stdin in
+                               :container-stdin (make-instance 
+                                                 'stdin-writer :stdin-socket in
+                                                 :stdin-stream (make-flexi-stream 
+                                                                (socket-stream in)
+                                                                :element-type 'character))
                                :container-stdout (make-instance 'frame-reader :frame-stream out)
                                :container-stderr (make-instance 'frame-reader :frame-stream err))))))
       (match result
@@ -215,10 +264,9 @@
                            (char-stream (make-flexi-stream 
                                          (socket-stream (frame-stream frame-reader)))))
                        (loop for i from 0 to (- size 1)
-                          do (setf (aref buffer i)
+                          do (setf (aref buffer (write-pointer frame-reader))
                                    (read-char char-stream))
                             (setf (write-pointer frame-reader) 
-                                  (mod (+ (write-pointer frame-reader) 1) (length buffer))))
-                       buffer))
+                                  (mod (+ (write-pointer frame-reader) 1) (length buffer))))))
                    (read-frame-header (socket-stream (frame-stream frame-reader))))
       (error (e) (left (format nil "Error while reading frame ~a" e))))))
