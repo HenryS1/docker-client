@@ -1,6 +1,5 @@
 (defsystem "docker-client"
   :version "0.1.0"
-  :author "Henry and Ed"
   :license "MIT"
   :depends-on ("usocket"
                "arrow-macros"
@@ -23,7 +22,6 @@
   :in-order-to ((test-op (test-op "docker-client/tests"))))
 
 (defsystem "docker-client/tests"
-  :author "Henry and Ed"
   :license "MIT"
   :depends-on ("docker-client"
                "rove")
