@@ -3,6 +3,7 @@
         :flexi-streams
         :monad
         :either
+        :herodotus
         :trivia
         :trivia.ppcre)
   (:export :start-container :attach-container 
@@ -14,9 +15,13 @@
            :create-container
            :connect-docker-socket
            :docker-stream
-           :close-docker-socket))
+           :close-docker-socket
+           :inspect-container))
 
 (in-package :docker-client)
+
+(define-json-model container-state ((paused () "Paused") (running () "Running")))
+(define-json-model inspect-result ((state container-state "State")))
 
 (defclass status ()
   ((version :reader version :initarg :version)
@@ -29,7 +34,8 @@
 
 (defclass http-response ()
   ((http-status :reader http-status :initarg :http-status)
-   (http-headers :reader http-headers :initarg :http-headers)))
+   (http-headers :reader http-headers :initarg :http-headers)
+   (http-body :reader http-body :initarg :http-body :initform nil)))
 
 (defclass docker-socket ()
   ((docker-connection :reader socket-connection :initarg :docker-connection)
@@ -72,13 +78,18 @@
                       (rest (read-headers socket-stream))
                       (yield (cons first rest)))))))
 
-(defun read-http-response (socket-stream)
+(defun read-http-response (socket-stream &key (body-parser nil))
   (let ((status-line (read-line socket-stream nil nil)))
     (if (not status-line)
         (left "End of input")
         (mdo (status (parse-status status-line))
              (headers (read-headers socket-stream))
-             (yield (make-instance 'http-response :http-status status :http-headers headers))))))
+             (body (if body-parser (funcall body-parser socket-stream status headers) (right nil)))
+             (yield (make-instance 
+                     'http-response
+                     :http-status status
+                     :http-headers headers
+                     :http-body body))))))
 
 (defclass frame-reader (sb-gray:fundamental-character-input-stream)
   ((buffer :reader buffer :initform (make-array 2000000 :element-type 'character))
@@ -153,7 +164,8 @@
    (request-headers :reader request-headers :initarg :request-headers :initform nil)
    (request-body :reader request-body :initarg :request-body :initform nil)))
 
-(defmethod send-http-request-over-socket ((http-request http-request) socket-stream)
+(defmethod send-http-request-over-socket ((http-request http-request) socket-stream 
+                                          &key (response-body-parser nil))
   (handler-case (progn (format socket-stream "~a ~a HTTP/1.0~a~a"
                                (request-method http-request) 
                                (request-uri http-request)
@@ -169,15 +181,19 @@
                        (when (request-body http-request)
                          (format socket-stream (request-body http-request)))
                        (finish-output socket-stream)
-                       (read-http-response socket-stream))
+                       (read-http-response socket-stream :body-parser response-body-parser))
     (error (e) (left (format nil "Error sending http-request ~a" e)))))
 
-(defmethod send-http-request ((http-request http-request) response-handler)
+(defmethod send-http-request ((http-request http-request) response-handler 
+                              &key (response-body-parser nil))
   (handler-case 
       (let ((socket-connection (connect-docker-socket)))
         (unwind-protect 
              (mdo (sock socket-connection)
-                  (response (send-http-request-over-socket http-request (docker-stream sock)))
+                  (response (send-http-request-over-socket 
+                             http-request
+                             (docker-stream sock)
+                             :response-body-parser response-body-parser))
                   (result (funcall response-handler response))
                   (yield result))
           (fmap #'close-docker-socket socket-connection)))
@@ -204,6 +220,28 @@
                                                (code (http-status response))
                                                (reason-phrase 
                                                 (http-status response)))))))))
+
+(defmethod inspect-container (identifier)
+  (send-http-request (make-instance
+                      'http-request
+                      :request-method :get
+                      :request-uri (format nil "/v1.41/containers/~a/json" identifier))
+                     (lambda (response)
+                       (cond ((= (code (http-status response)) 200)
+                              (right (http-body response)))
+                             ((= (code (http-status response)) 404)
+                              (left (format nil "Container not found: ~a ~a~%"
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 500)
+                              (left (format nil "Docker daemon error: ~a ~a~%"
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))))
+                     :response-body-parser (lambda (stream status headers)
+                                             (declare (ignore status headers))
+                                             (handler-case
+                                                 (right (inspect-result-json:from-json stream))
+                                               (error (e) (format nil "Error parsing respones json ~a" e))))))
 
 (defmethod pause-container (identifier)
   (send-http-request (make-instance 
@@ -242,7 +280,6 @@
                                                  "Unexpected response from docker daemon: ~a ~a" 
                                                  (code (http-status response))
                                                  (reason-phrase (http-status response)))))))))
-
 
 (defmethod stop-container (identifier)
   (send-http-request (make-instance

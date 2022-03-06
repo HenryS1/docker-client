@@ -11,9 +11,8 @@
                "trivia"
                "unix-opts"
                "cl-fad"
-               "trivia.ppcre"
-               "runtime"
-               "game-runner")
+               "herodotus"
+               "trivia.ppcre")
   :components ((:module "src"
                 :components
                 ((:file "docker-client"))))
