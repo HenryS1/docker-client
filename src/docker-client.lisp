@@ -40,8 +40,9 @@
                   (handler-case (progn 
                                   (sb-bsd-sockets:socket-connect socket "/var/run/docker.sock")
                                   (let ((stream (sb-bsd-sockets:socket-make-stream socket :input t :output t)))
-                                    (right (make-instance 'docker-socket :docker-connection socket
-                                                    :docker-stream stream))))
+                                    (right (make-instance 'docker-socket
+                                                          :docker-connection socket
+                                                          :docker-stream stream))))
                     (error (e) (left (format nil "Error while connecting docker socket ~a" e)))))
     (error (e) (left (format nil "Error while constructing docker socket ~a" e)))))
 
@@ -139,6 +140,69 @@
   (close (container-stdin attachment))
   (close (container-stdout attachment))
   (close (container-stderr attachment)))
+
+(defclass http-header ()
+  ((header-name: :reader header-name :initarg :header-name)
+   (header-value :reader header-value :initarg :header-value)))
+
+(defclass http-request ()
+  ((request-method :reader request-method :initarg :request-method)
+   (request-uri :reader request-uri :initarg :request-uri)
+   (request-headers :reader request-headers :initarg :request-headers :initform nil)
+   (request-body :reader request-body :initarg :body :initform nil)))
+
+(defmethod send-http-request-over-socket ((http-request http-request) 
+                                          (docker-socket docker-socket))
+  (handler-case (progn (format (docker-stream docker-socket) "~a ~a HTTP/1.0~a~a"
+                               (request-method http-request) 
+                               (request-uri http-request)
+                               #\return #\newline)
+                       (loop for header in (request-headers http-request)
+                          do (format (docker-stream docker-socket) "~a: ~a~a~a" 
+                                     (header-name header) (header-value header) 
+                                     #\return #\newline))
+                       (when (request-body http-request)
+                         (format (docker-stream docker-socket) "Content-Length: ~a~a~a"
+                                 (length (request-body http-request)) #\return #\newline))
+                       (format (docker-stream docker-socket) "~a~a" #\return #\newline)
+                       (when (request-body http-request)
+                         (format (docker-stream docker-socket) (request-body http-request)))
+                       (right (finish-output (docker-stream docker-socket))))
+    (error (e) (left (format nil "Error sending http-request ~a" e)))))
+
+(defmethod send-http-request ((http-request http-request) response-handler)
+  (handler-case 
+      (let ((socket-connection (connect-docker-socket)))
+        (unwind-protect 
+             (mdo (sock socket-connection)
+                  (_ (send-http-request-over-socket http-request sock))
+                  (response (read-http-response (docker-stream sock)))
+                  (result (funcall response-handler response))
+                  (yield result))
+          (fmap #'close-docker-socket socket-connection)))
+    (error (e) (left (format nil "Failed to send http request: ~a" e)))))
+
+(defmethod start-container (identifier)
+  (send-http-request (make-instance 
+                      'http-request
+                      :request-method :post
+                      :request-uri (format nil "/v1.41/containers/~a/start" identifier))
+                     (lambda (response)
+                        (cond ((= (code (http-status response)) 500)
+                               (left (format nil "Error from docker daemon: 500 ~a" 
+                                             (reason-phrase (http-status response)))))
+                              ((= (code (http-status response)) 404)
+                               (left (format nil "Container does not exist: 404 ~a"
+                                             (reason-phrase (http-status response)))))
+                              ((= (code (http-status response)) 304)
+                               (right "Container already started"))
+                              ((= (code (http-status response)) 204)
+                               (right "Started container"))
+                              (t (left (format nil
+                                               "Unexpected response from docker daemon: ~a ~a" 
+                                               (code (http-status response))
+                                               (reason-phrase 
+                                                (http-status response)))))))))
 
 (defmethod pause-container (identifier)
   (handler-case 
@@ -250,35 +314,6 @@
                         (read-http-response (socket-stream sock))))
           (socket-close sock)))
     (error (e) (left (format nil "Failed to create docker container: ~a" e)))))
-
-(defmethod start-container (identifier)
-  (handler-case 
-      (let ((socket-connection (connect-docker-socket)))
-        (unwind-protect 
-             (mdo (sock socket-connection)
-                  (let (_ (progn (format (docker-stream sock)
-                                         "POST /v1.41/containers/~a/start HTTP/1.0~a~a~a~a"
-                                         identifier #\return #\newline #\return #\newline)
-                                 (force-output (docker-stream sock)))))
-                  (response (read-http-response (docker-stream sock)))
-                  (result (cond ((= (code (http-status response)) 500)
-                                 (left (format nil "Error from docker daemon: 500 ~a" 
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 404)
-                                 (left (format nil "Container does not exist: 404 ~a"
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 304)
-                                 (right "Container already started"))
-                                ((= (code (http-status response)) 204)
-                                 (right "Started container"))
-                                (t (left (format nil
-                                                 "Unexpected response from docker daemon: ~a ~a" 
-                                                 (code (http-status response))
-                                                 (reason-phrase 
-                                                  (http-status response)))))))
-                  (yield result))
-          (fmap #'close-docker-socket socket-connection)))
-    (error (e) (left (format nil "Failed to start docker container: ~a" e)))))
 
 (defmethod stop-container (identifier)
   (handler-case 
