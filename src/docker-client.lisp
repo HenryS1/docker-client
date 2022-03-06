@@ -282,15 +282,16 @@
 
 (defmethod stop-container (identifier)
   (handler-case 
-      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
+      (let ((socket-connection (connect-docker-socket)))
         (unwind-protect 
-             (progn 
-               (format (socket-stream sock)
-                       "POST /v1.41/containers/~a/stop HTTP/1.0~a~a~a~a"
-                       identifier #\return #\newline #\return #\newline)
-               (force-output (socket-stream sock))
-               (flatmap (lambda (response) 
-                          (cond ((= (code (http-status response)) 500)
+             (mdo (sock socket-connection) 
+                  (let (_ (progn
+                            (format (docker-stream sock)
+                                    "POST /v1.41/containers/~a/stop HTTP/1.0~a~a~a~a"
+                                    identifier #\return #\newline #\return #\newline)
+                            (force-output (docker-stream sock)))))
+                  (response (read-http-response (docker-stream sock)))
+                  (result (cond ((= (code (http-status response)) 500)
                                  (left (format nil "Error from docker daemon: 500 ~a" 
                                                (reason-phrase (http-status response)))))
                                 ((= (code (http-status response)) 404)
@@ -304,8 +305,8 @@
                                                  "Unexpected response from docker daemon: ~a ~a" 
                                                  (code (http-status response))
                                                  (reason-phrase (http-status response)))))))
-                        (read-http-response (socket-stream sock))))
-          (socket-close sock)))
+                  (yield result))
+          (fmap #'close-docker-socket socket-connection)))
     (error (e) (left (format nil "Failed to stop docker container: ~a" e)))))
 
 (defun attach-socket (identifier attach-type)
