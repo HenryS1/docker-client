@@ -142,14 +142,14 @@
   (close (container-stderr attachment)))
 
 (defclass http-header ()
-  ((header-name: :reader header-name :initarg :header-name)
+  ((header-name :reader header-name :initarg :header-name)
    (header-value :reader header-value :initarg :header-value)))
 
 (defclass http-request ()
   ((request-method :reader request-method :initarg :request-method)
    (request-uri :reader request-uri :initarg :request-uri)
    (request-headers :reader request-headers :initarg :request-headers :initform nil)
-   (request-body :reader request-body :initarg :body :initform nil)))
+   (request-body :reader request-body :initarg :request-body :initform nil)))
 
 (defmethod send-http-request-over-socket ((http-request http-request) 
                                           (docker-socket docker-socket))
@@ -204,43 +204,33 @@
                                                (reason-phrase 
                                                 (http-status response)))))))))
 
+
 (defmethod pause-container (identifier)
-  (handler-case 
-      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
-        (unwind-protect 
-             (progn 
-               (format (socket-stream sock)
-                       "POST /v1.41/containers/~a/pause HTTP/1.0~a~a~a~a"
-                       identifier #\return #\newline #\return #\newline)
-               (force-output (socket-stream sock))
-               (flatmap (lambda (response) 
-                          (cond ((= (code (http-status response)) 500)
-                                 (left (format nil "Error from docker daemon: 500 ~a" 
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 404)
-                                 (left (format nil "Container does not exist: 404 ~a"
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 204)
-                                 (right "Paused container"))
-                                (t (left (format nil
-                                                 "Unexpected response from docker daemon: ~a ~a" 
-                                                 (code (http-status response))
-                                                 (reason-phrase (http-status response)))))))
-                        (read-http-response (socket-stream sock))))
-          (socket-close sock)))
-    (error (e) (left (format nil "Failed to pause docker container: ~a" e)))))
+  (send-http-request (make-instance 
+                      'http-request
+                      :request-method :post
+                      :request-uri (format nil "/v1.41/containers/~a/pause" identifier))
+                     (lambda (response)
+                       (cond ((= (code (http-status response)) 500)
+                              (left (format nil "Error from docker daemon: 500 ~a" 
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 404)
+                              (left (format nil "Container does not exist: 404 ~a"
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 204)
+                              (right "Paused container"))
+                             (t (left (format nil
+                                              "Unexpected response from docker daemon: ~a ~a" 
+                                              (code (http-status response))
+                                              (reason-phrase (http-status response)))))))))
 
 (defmethod unpause-container (identifier)
-  (handler-case 
-      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
-        (unwind-protect 
-             (progn 
-               (format (socket-stream sock)
-                       "POST /v1.41/containers/~a/unpause HTTP/1.0~a~a~a~a"
-                       identifier #\return #\newline #\return #\newline)
-               (force-output (socket-stream sock))
-               (flatmap (lambda (response) 
-                          (cond ((= (code (http-status response)) 500)
+  (send-http-request (make-instance
+                      'http-request
+                      :request-method :post
+                      :request-uri (format nil "/v1.41/containers/~a/unpause" identifier))
+                     (lambda (response)
+                       (cond ((= (code (http-status response)) 500)
                                  (left (format nil "Error from docker daemon: 500 ~a" 
                                                (reason-phrase (http-status response)))))
                                 ((= (code (http-status response)) 404)
@@ -251,98 +241,77 @@
                                 (t (left (format nil
                                                  "Unexpected response from docker daemon: ~a ~a" 
                                                  (code (http-status response))
-                                                 (reason-phrase (http-status response)))))))
-                        (read-http-response (socket-stream sock))))
-          (socket-close sock)))
-    (error (e) (left (format nil "Failed to unpause docker container: ~a" e)))))
+                                                 (reason-phrase (http-status response)))))))))
+
+
+(defmethod stop-container (identifier)
+  (send-http-request (make-instance
+                      'http-request
+                      :request-method :post
+                      :request-uri (format nil "/v1.41/containers/~a/stop" identifier))
+                     (lambda (response)
+                       (cond ((= (code (http-status response)) 500)
+                              (left (format nil "Error from docker daemon: 500 ~a" 
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 404)
+                              (left (format nil "Container does not exist: 404 ~a"
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 304)
+                              (right "Container already stopped"))
+                             ((= (code (http-status response)) 204)
+                              (right "Stopped container"))
+                             (t (left (format nil
+                                              "Unexpected response from docker daemon: ~a ~a" 
+                                              (code (http-status response))
+                                              (reason-phrase (http-status response)))))))))
 
 (defmethod remove-container (identifier)
-  (handler-case 
-      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
-        (unwind-protect 
-             (progn 
-               (format (socket-stream sock)
-                       "DELETE /v1.41/containers/~a HTTP/1.0~a~a~a~a"
-                       identifier #\return #\newline #\return #\newline)
-               (force-output (socket-stream sock))
-               (flatmap (lambda (response) 
-                          (cond ((= (floor (code (http-status response)) 100) 5)
-                                 (left (format nil "Error from docker daemon: ~a ~a" 
-                                               (code (http-status response))
-                                               (reason-phrase (http-status response)))))
-                                ((= (floor (code (http-status response)) 100) 4)
-                                 (left (format nil "Client error: ~a ~a"
-                                               (code (http-status response))
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 204)
-                                 (right "Removed container"))
-                                (t (left (format nil
-                                                 "Unexpected response from docker daemon: ~a ~a" 
-                                                 (code (http-status response))
-                                                 (reason-phrase (http-status response)))))))
-                        (read-http-response (socket-stream sock))))
-          (socket-close sock)))
-    (error (e) (left (format nil "Failed to remove docker container: ~a" e)))))
+  (send-http-request (make-instance
+                      'http-request
+                      :request-method :delete
+                      :request-uri (format nil "/v1.41/containers/~a" identifier))
+                     (lambda (response)
+                       (cond ((= (floor (code (http-status response)) 100) 5)
+                              (left (format nil "Error from docker daemon: ~a ~a" 
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))
+                             ((= (floor (code (http-status response)) 100) 4)
+                              (left (format nil "Client error: ~a ~a"
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 204)
+                              (right "Removed container"))
+                             (t (left (format nil
+                                              "Unexpected response from docker daemon: ~a ~a" 
+                                              (code (http-status response))
+                                              (reason-phrase (http-status response)))))))))
 
 (defparameter *create-json* "{\"Hostname\":\"\",\"Domainname\":\"\",\"User\":\"\",\"AttachStdin\":false,\"AttachStdout\":false,\"AttachStderr\":false,\"Tty\":false,\"OpenStdin\":true,\"StdinOnce\":false,\"Env\":[],\"Image\":\"~a\",\"Labels\":{},\"Volumes\":{},\"WorkingDir\":\"\",\"NetworkDisabled\":false,\"MacAddress\":\"12:34:56:78:9a:bc\",\"ExposedPorts\":{},\"StopSignal\":\"SIGTERM\",\"StopTimeout\":10,\"HostConfig\":{},\"NetworkingConfig\":{}}")
 
 (defmethod create-container (identifier image-name)
-  (handler-case 
-      (let ((sock (socket-connect "localhost" 2375 :element-type 'character)))
-        (unwind-protect 
-             (let ((body (format nil *create-json* image-name)))
-               (format (socket-stream sock)
-                       "POST /v1.41/containers/create?name=~a HTTP/1.0~a~aContent-Length: ~a~a~aContent-Type: application/json~a~a~a~a~a"
-                       identifier
-                       #\return #\newline (length body) #\return #\newline #\return #\newline #\return #\newline body)
-               (force-output (socket-stream sock))
-               (flatmap (lambda (response) 
-                          (cond ((= (floor (code (http-status response)) 100) 5)
-                                 (left (format nil "Error from docker daemon: ~a ~a" 
-                                               (code (http-status response))
-                                               (reason-phrase (http-status response)))))
-                                ((= (floor (code (http-status response)) 100) 4)
-                                 (left (format nil "Client error: ~a ~a"
-                                               (code (http-status response))
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 201)
-                                 (right "Created container"))
-                                (t (left (format nil
-                                                 "Unexpected response from docker daemon: ~a ~a" 
-                                                 (code (http-status response))
-                                                 (reason-phrase (http-status response)))))))
-                        (read-http-response (socket-stream sock))))
-          (socket-close sock)))
-    (error (e) (left (format nil "Failed to create docker container: ~a" e)))))
-
-(defmethod stop-container (identifier)
-  (handler-case 
-      (let ((socket-connection (connect-docker-socket)))
-        (unwind-protect 
-             (mdo (sock socket-connection) 
-                  (let (_ (progn
-                            (format (docker-stream sock)
-                                    "POST /v1.41/containers/~a/stop HTTP/1.0~a~a~a~a"
-                                    identifier #\return #\newline #\return #\newline)
-                            (force-output (docker-stream sock)))))
-                  (response (read-http-response (docker-stream sock)))
-                  (result (cond ((= (code (http-status response)) 500)
-                                 (left (format nil "Error from docker daemon: 500 ~a" 
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 404)
-                                 (left (format nil "Container does not exist: 404 ~a"
-                                               (reason-phrase (http-status response)))))
-                                ((= (code (http-status response)) 304)
-                                 (right "Container already stopped"))
-                                ((= (code (http-status response)) 204)
-                                 (right "Stopped container"))
-                                (t (left (format nil
-                                                 "Unexpected response from docker daemon: ~a ~a" 
-                                                 (code (http-status response))
-                                                 (reason-phrase (http-status response)))))))
-                  (yield result))
-          (fmap #'close-docker-socket socket-connection)))
-    (error (e) (left (format nil "Failed to stop docker container: ~a" e)))))
+  (send-http-request (make-instance 
+                      'http-request
+                      :request-method :post
+                      :request-uri (format nil "/v1.41/containers/create?name=~a" identifier)
+                      :request-headers (list (make-instance 'http-header 
+                                                            :header-name "Content-Type"
+                                                            :header-value "application/json"))
+                      :request-body (format nil *create-json* image-name))
+                     (lambda (response)
+                       (cond ((= (floor (code (http-status response)) 100) 5)
+                              (left (format nil "Error from docker daemon: ~a ~a" 
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))
+                             ((= (floor (code (http-status response)) 100) 4)
+                              (left (format nil "Client error: ~a ~a"
+                                            (code (http-status response))
+                                            (reason-phrase (http-status response)))))
+                             ((= (code (http-status response)) 201)
+                              (right "Created container"))
+                             (t (left (format nil
+                                              "Unexpected response from docker daemon: ~a ~a" 
+                                              (code (http-status response))
+                                              (reason-phrase (http-status response)))))))))
 
 (defun attach-socket (identifier attach-type)
   (let ((attach-query (case attach-type
