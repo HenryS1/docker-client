@@ -241,7 +241,10 @@
                                              (declare (ignore status headers))
                                              (handler-case
                                                  (right (inspect-result-json:from-json stream))
-                                               (error (e) (format nil "Error parsing respones json ~a" e))))))
+                                               (error (e) 
+                                                 (format 
+                                                  nil
+                                                  "Error parsing respones json ~a" e))))))
 
 (defmethod pause-container (identifier)
   (send-http-request (make-instance 
@@ -323,9 +326,12 @@
                                               (code (http-status response))
                                               (reason-phrase (http-status response)))))))))
 
-(defparameter *create-json* "{\"Hostname\":\"\",\"Domainname\":\"\",\"User\":\"\",\"AttachStdin\":false,\"AttachStdout\":false,\"AttachStderr\":false,\"Tty\":false,\"OpenStdin\":true,\"StdinOnce\":false,\"Env\":[],\"Image\":\"~a\",\"Labels\":{},\"Volumes\":{},\"WorkingDir\":\"\",\"NetworkDisabled\":false,\"MacAddress\":\"12:34:56:78:9a:bc\",\"ExposedPorts\":{},\"StopSignal\":\"SIGTERM\",\"StopTimeout\":10,\"HostConfig\":{},\"NetworkingConfig\":{}}")
+(define-json-model docker-config ((image () "Image") 
+                                  (command () "Cmd")
+                                  (entrypoint () "Entrypoint")
+                                  (open-stdin () "OpenStdin")))
 
-(defmethod create-container (identifier image-name)
+(defmethod create-container (identifier image-name &key (command nil))
   (send-http-request (make-instance 
                       'http-request
                       :request-method :post
@@ -333,7 +339,9 @@
                       :request-headers (list (make-instance 'http-header 
                                                             :header-name "Content-Type"
                                                             :header-value "application/json"))
-                      :request-body (format nil *create-json* image-name))
+                      :request-body (if command
+                                        (to-json (make-instance 'docker-config :image image-name :command command :open-stdin t :entrypoint ""))
+                                        (to-json (make-instance 'docker-config :image image-name :command nil :open-stdin t :entrypoint ""))))
                      (lambda (response)
                        (cond ((= (floor (code (http-status response)) 100) 5)
                               (left (format nil "Error from docker daemon: ~a ~a" 
