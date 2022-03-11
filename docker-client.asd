@@ -12,6 +12,7 @@
                "unix-opts"
                "cl-fad"
                "herodotus"
+               "alexandria"
                "trivia.ppcre")
   :components ((:module "src"
                 :components

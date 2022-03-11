@@ -3,6 +3,7 @@
         :flexi-streams
         :monad
         :either
+        :alexandria
         :herodotus
         :trivia
         :trivia.ppcre)
@@ -10,12 +11,19 @@
            :detach :attach-socket :close-connection
            :container-stdin :container-stdout :container-stderr 
            :stop-container :stdin-socket
+           :host-config
+           :docker-config
+           :*default-docker-config*
            :pause-container :unpause-container
            :remove-container
            :create-container
            :connect-docker-socket
            :docker-stream
            :close-docker-socket
+           :paused 
+           :running
+           :state
+           :container-input-stream
            :inspect-container))
 
 (in-package :docker-client)
@@ -131,6 +139,9 @@
    (container-stdin :reader container-stdin :initarg :container-stdin)
    (container-stdout :reader container-stdout :initarg :container-stdout)
    (container-stderr :reader container-stderr :initarg :container-stderr)))
+
+(defmethod container-input-stream ((attached-container attached-container))
+  (stdin-stream (container-stdin attached-container)))
 
 (defclass stdin-writer (sb-gray:fundamental-character-output-stream)
   ((stdin-socket :reader stdin-socket :initarg :stdin-socket)
@@ -284,11 +295,11 @@
                                                  (code (http-status response))
                                                  (reason-phrase (http-status response)))))))))
 
-(defmethod stop-container (identifier)
+(defmethod stop-container (identifier &key (kill-wait 10))
   (send-http-request (make-instance
                       'http-request
                       :request-method :post
-                      :request-uri (format nil "/v1.41/containers/~a/stop" identifier))
+                      :request-uri (format nil "/v1.41/containers/~a/stop?t=~a" identifier kill-wait))
                      (lambda (response)
                        (cond ((= (code (http-status response)) 500)
                               (left (format nil "Error from docker daemon: 500 ~a" 
@@ -326,12 +337,35 @@
                                               (code (http-status response))
                                               (reason-phrase (http-status response)))))))))
 
-(define-json-model docker-config ((image () "Image") 
-                                  (command () "Cmd")
-                                  (entrypoint () "Entrypoint")
-                                  (open-stdin () "OpenStdin")))
+(define-json-model host-config ((binds () "Binds")))
 
-(defmethod create-container (identifier image-name &key (command nil))
+(define-json-model docker-config ((image) 
+                                  (command)
+                                  (entrypoint)
+                                  (open-stdin)
+                                  (volumes)
+                                  (host-config host-config)) :pascal-case)
+
+(defparameter *blah-config* (make-instance 'docker-config 
+                                           :image "bot-match/lisp-base"
+                                           :command (list "ros +Q -- /bots/input-bot.lisp")
+                                           :entrypoint (list "")
+                                           :open-stdin t
+                                           :volumes (alist-hash-table (list (cons "/Users/henrysteere/wip/lisp/bot-match/runtime/tests/" (alist-hash-table (list) :test 'equal))) :test 'equal)
+                                           :host-config (make-instance 'host-config
+                                                                       :binds (list "/Users/henrysteere/wip/lisp/bot-match/runtime/tests/:/bots"))))
+
+(defparameter *default-docker-config* (make-instance 'docker-config 
+                                                     :image "ubuntu:21.04"
+                                                     :command "date"
+                                                     :entrypoint nil
+                                                     :open-stdin t
+                                                     :volumes nil
+                                                     :host-config nil))
+
+(define-json-model bad-request (message))
+
+(defmethod create-container (identifier &key (docker-config *default-docker-config*))
   (send-http-request (make-instance 
                       'http-request
                       :request-method :post
@@ -339,9 +373,7 @@
                       :request-headers (list (make-instance 'http-header 
                                                             :header-name "Content-Type"
                                                             :header-value "application/json"))
-                      :request-body (if command
-                                        (to-json (make-instance 'docker-config :image image-name :command command :open-stdin t :entrypoint ""))
-                                        (to-json (make-instance 'docker-config :image image-name :command nil :open-stdin t :entrypoint ""))))
+                      :request-body (to-json docker-config))
                      (lambda (response)
                        (cond ((= (floor (code (http-status response)) 100) 5)
                               (left (format nil "Error from docker daemon: ~a ~a" 
@@ -356,7 +388,16 @@
                              (t (left (format nil
                                               "Unexpected response from docker daemon: ~a ~a" 
                                               (code (http-status response))
-                                              (reason-phrase (http-status response)))))))))
+                                              (reason-phrase (http-status response)))))))
+                     ;; :response-body-parser (lambda (stream status headers)
+                     ;;                         (declare (ignore status headers))
+                     ;;                         (handler-case
+                     ;;                             (right (inspect-result-json:from-json stream))
+                     ;;                           (error (e) 
+                     ;;                             (format 
+                     ;;                              nil
+                     ;;                              "Error parsing respones json ~a" e))))
+                     ))
 
 (defun attach-socket (identifier attach-type)
   (handler-case 
