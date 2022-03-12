@@ -87,17 +87,17 @@
                       (yield (cons first rest)))))))
 
 (defun read-http-response (socket-stream &key (body-parser nil))
-  (let ((status-line (read-line socket-stream nil nil)))
-    (if (not status-line)
-        (left "End of input")
-        (mdo (status (parse-status status-line))
-             (headers (read-headers socket-stream))
-             (body (if body-parser (funcall body-parser socket-stream status headers) (right nil)))
-             (yield (make-instance 
-                     'http-response
-                     :http-status status
-                     :http-headers headers
-                     :http-body body))))))
+  (mdo (handle error (e) (left (format nil "Error reading socket stream ~a" e)))
+       (status-line (let ((line (read-line socket-stream nil nil))) 
+                      (if line (right line) (left "End of input"))))
+       (status (parse-status status-line))
+       (headers (read-headers socket-stream))
+       (body (if body-parser (funcall body-parser socket-stream status headers) (right nil)))
+       (yield (make-instance 
+               'http-response
+               :http-status status
+               :http-headers headers
+               :http-body body))))
 
 (defclass frame-reader (sb-gray:fundamental-character-input-stream)
   ((buffer :reader buffer :initform (make-array 2000000 :element-type 'character))
@@ -197,18 +197,16 @@
 
 (defmethod send-http-request ((http-request http-request) response-handler 
                               &key (response-body-parser nil))
-  (handler-case 
-      (let ((socket-connection (connect-docker-socket)))
-        (unwind-protect 
-             (mdo (sock socket-connection)
-                  (response (send-http-request-over-socket 
-                             http-request
-                             (docker-stream sock)
-                             :response-body-parser response-body-parser))
-                  (result (funcall response-handler response))
-                  (yield result))
-          (fmap #'close-docker-socket socket-connection)))
-    (error (e) (left (format nil "Failed to send http request: ~a" e)))))
+  (mdo (handle error (e) (left (format nil "Failed to send http request: ~a" e)))
+       (with #'close-docker-socket sock (connect-docker-socket))
+       (response (send-http-request-over-socket 
+                  http-request
+                  (docker-stream sock)
+                  :response-body-parser response-body-parser))
+       (result (funcall response-handler response))
+       (yield result)))
+
+(define-json-model docker-client-error (message))
 
 (defmethod start-container (identifier)
   (send-http-request (make-instance 
@@ -226,11 +224,14 @@
                                (right "Container already started"))
                               ((= (code (http-status response)) 204)
                                (right "Started container"))
-                              (t (left (format nil
-                                               "Unexpected response from docker daemon: ~a ~a" 
-                                               (code (http-status response))
-                                               (reason-phrase 
-                                                (http-status response)))))))))
+                              (t (left (http-body response)))))
+                     :response-body-parser (lambda (stream status headers)
+                                             (declare (ignore headers))
+                                             (mdo (handle error (e) (left (format nil "Error parsing body ~a" e)))
+                                                  (body (if (or (= (code status) 204) (= (code status) 304))
+                                                            (right "")
+                                                            (right (docker-client-error-json:from-json stream))))
+                                                  (yield body)))))
 
 (defmethod inspect-container (identifier)
   (send-http-request (make-instance
@@ -340,30 +341,19 @@
 (define-json-model host-config ((binds () "Binds")))
 
 (define-json-model docker-config ((image) 
-                                  (command)
+                                  (cmd)
                                   (entrypoint)
                                   (open-stdin)
                                   (volumes)
                                   (host-config host-config)) :pascal-case)
 
-(defparameter *blah-config* (make-instance 'docker-config 
-                                           :image "bot-match/lisp-base"
-                                           :command (list "ros +Q -- /bots/input-bot.lisp")
-                                           :entrypoint (list "")
-                                           :open-stdin t
-                                           :volumes (alist-hash-table (list (cons "/Users/henrysteere/wip/lisp/bot-match/runtime/tests/" (alist-hash-table (list) :test 'equal))) :test 'equal)
-                                           :host-config (make-instance 'host-config
-                                                                       :binds (list "/Users/henrysteere/wip/lisp/bot-match/runtime/tests/:/bots"))))
-
 (defparameter *default-docker-config* (make-instance 'docker-config 
                                                      :image "ubuntu:21.04"
-                                                     :command "date"
+                                                     :cmd "date"
                                                      :entrypoint nil
                                                      :open-stdin t
                                                      :volumes nil
                                                      :host-config nil))
-
-(define-json-model bad-request (message))
 
 (defmethod create-container (identifier &key (docker-config *default-docker-config*))
   (send-http-request (make-instance 
@@ -389,80 +379,66 @@
                                               "Unexpected response from docker daemon: ~a ~a" 
                                               (code (http-status response))
                                               (reason-phrase (http-status response)))))))
-                     ;; :response-body-parser (lambda (stream status headers)
-                     ;;                         (declare (ignore status headers))
-                     ;;                         (handler-case
-                     ;;                             (right (inspect-result-json:from-json stream))
-                     ;;                           (error (e) 
-                     ;;                             (format 
-                     ;;                              nil
-                     ;;                              "Error parsing respones json ~a" e))))
-                     ))
+                     :response-body-parser (lambda (stream status headers)
+                                             (declare (ignore headers))
+                                             (mdo (handle error (e) (left (format nil "Error parsing response body ~a" e)))
+                                                  (body (if (= (code status) 201) 
+                                                       (right "")
+                                                       (right (docker-client-error-json:from-json stream))))
+                                                  (yield body)))))
 
 (defun attach-socket (identifier attach-type)
-  (handler-case 
-   (let ((socket-connection (connect-docker-socket :element-type '(unsigned-byte 8)))
-         (attach-query (case attach-type
-                         (:stdin (right "stdin=1"))
-                         (:stdout (right "stdout=1"))
-                         (:stderr (right "stderr=1"))
-                         (otherwise (left (format nil "Unknown attach-type ~a" attach-type))))))
-     (handler-case 
-         (mdo (sock socket-connection)
-              (query attach-query)
-              (let (char-stream (make-flexi-stream (docker-stream sock))))
-              (response
-               (send-http-request-over-socket 
-                (make-instance
-                 'http-request 
-                 :request-method :post
-                 :request-uri (format nil "/v1.41/containers/~a/attach?stream=1&~a" identifier query)
-                 :request-headers (list (make-instance 
-                                      'http-header 
-                                      :header-name "Upgrade"
-                                      :header-value "tcp")
-                                     (make-instance 
-                                      'http-header
-                                      :header-name "Connection"
-                                      :header-value "Upgrade")))
-                char-stream))
-              (result (if (and (/= (code (http-status response)) 101)
-                               (/= (code (http-status response)) 200))
-                          (progn (close-docker-socket sock)
-                                 (left (format nil 
-                                               "Failed to attach to container ~a ~a" 
-                                               (code (http-status response))
-                                               (reason-phrase (http-status response)))))
-                          (right sock)))
-              (yield result))
-       (error (e) (fmap #'close-docker-socket socket-connection)
-              (left (format nil "Error attaching socket ~a" e)))))))
+  (let ((attach-query (case attach-type
+                        (:stdin (right "stdin=1"))
+                        (:stdout (right "stdout=1"))
+                        (:stderr (right "stderr=1"))
+                        (otherwise (left (format nil "Unknown attach-type ~a" attach-type))))))
+    (mdo (handle error (e) (left (format nil "Error attaching socket ~a" e)))
+         (with #'close-docker-socket sock
+               (connect-docker-socket :element-type '(unsigned-byte 8)))
+         (query attach-query)
+         (let (char-stream (make-flexi-stream (docker-stream sock))))
+         (response
+          (send-http-request-over-socket 
+           (make-instance
+            'http-request 
+            :request-method :post
+            :request-uri (format nil "/v1.41/containers/~a/attach?stream=1&~a" identifier query)
+            :request-headers (list (make-instance 
+                                    'http-header 
+                                    :header-name "Upgrade"
+                                    :header-value "tcp")
+                                   (make-instance 
+                                    'http-header
+                                    :header-name "Connection"
+                                    :header-value "Upgrade")))
+           char-stream))
+         (result (if (and (/= (code (http-status response)) 101)
+                          (/= (code (http-status response)) 200))
+                     (progn (close-docker-socket sock)
+                            (left (format nil 
+                                          "Failed to attach to container ~a ~a" 
+                                          (code (http-status response))
+                                          (reason-phrase (http-status response)))))
+                     (right sock)))
+         (yield result))))
 
 (defun attach-container (identifier)
-  (let ((stdin (attach-socket identifier :stdin))
-        (stdout (attach-socket identifier :stdout))
-        (stderr (attach-socket identifier :stderr)))
-    (let ((result (mdo (in stdin)
-                       (out stdout)
-                       (err stderr)
-                       (yield (make-instance 
-                               'attached-container 
-                               :identifier identifier
-                               :container-stdin (make-instance 
-                                                 'stdin-writer 
-                                                 :stdin-socket in
-                                                 :stdin-stream (make-flexi-stream 
-                                                                (docker-stream in)
-                                                                :element-type 'character))
-                               :container-stdout (make-instance 'frame-reader :frame-stream out)
-                               :container-stderr (make-instance 'frame-reader :frame-stream err))))))
-      (match result
-        ((type right) result)
-        ((type left) 
-         (fmap #'close-docker-socket stdin)
-         (fmap #'close-docker-socket stdout)
-         (fmap #'close-docker-socket stderr)
-         result)))))
+  (mdo (handle error (e) (left (format nil "Error attaching to container ~a" e)))
+       (with #'close-docker-socket in (attach-socket identifier :stdin))
+       (with #'close-docker-socket out (attach-socket identifier :stdout))
+       (with #'close-docker-socket err (attach-socket identifier :stderr))
+       (yield (make-instance 
+               'attached-container 
+               :identifier identifier
+               :container-stdin (make-instance 
+                                 'stdin-writer 
+                                 :stdin-socket in
+                                 :stdin-stream (make-flexi-stream 
+                                                (docker-stream in)
+                                                :element-type 'character))
+               :container-stdout (make-instance 'frame-reader :frame-stream out)
+               :container-stderr (make-instance 'frame-reader :frame-stream err)))))
 
 (defstruct frame-header type payload-size)
 
@@ -488,18 +464,14 @@
           (determine-header-type buffer))))
 
 (defmethod read-frame ((frame-reader frame-reader))
-  (match 
-    (handler-case (flatmap 
-                   (lambda (header)
-                     (let ((size (frame-header-payload-size header))
-                           (buffer (buffer frame-reader))
-                           (char-stream (make-flexi-stream 
-                                         (docker-stream (frame-stream frame-reader)))))
-                       (loop for i from 0 to (- size 1)
-                          do (setf (aref buffer (write-pointer frame-reader))
-                                   (read-char char-stream))
-                            (setf (write-pointer frame-reader) 
-                                  (mod (+ (write-pointer frame-reader) 1) (length buffer))))))
-
-                   (read-frame-header (docker-stream (frame-stream frame-reader))))
-      (error (e) (left (format nil "Error while reading frame ~a" e))))))
+  (mdo (handle error (e) (left (format nil "Error while reading frame ~a" e)))
+       (header (read-frame-header (docker-stream (frame-stream frame-reader))))
+       (yield (let ((size (frame-header-payload-size header))
+                    (buffer (buffer frame-reader))
+                    (char-stream (make-flexi-stream 
+                                  (docker-stream (frame-stream frame-reader)))))
+                (loop for i from 0 to (- size 1)
+                   do (setf (aref buffer (write-pointer frame-reader))
+                            (read-char char-stream))
+                     (setf (write-pointer frame-reader) 
+                           (mod (+ (write-pointer frame-reader) 1) (length buffer))))))))
