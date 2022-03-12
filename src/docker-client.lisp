@@ -394,8 +394,8 @@
                         (:stderr (right "stderr=1"))
                         (otherwise (left (format nil "Unknown attach-type ~a" attach-type))))))
     (mdo (handle error (e) (left (format nil "Error attaching socket ~a" e)))
-         (with #'close-docker-socket sock
-               (connect-docker-socket :element-type '(unsigned-byte 8)))
+         (sock (connect-docker-socket :element-type '(unsigned-byte 8)))
+         (handle error (e) (close-docker-socket sock) (error e))
          (query attach-query)
          (let (char-stream (make-flexi-stream (docker-stream sock))))
          (response
@@ -425,9 +425,12 @@
 
 (defun attach-container (identifier)
   (mdo (handle error (e) (left (format nil "Error attaching to container ~a" e)))
-       (with #'close-docker-socket in (attach-socket identifier :stdin))
-       (with #'close-docker-socket out (attach-socket identifier :stdout))
-       (with #'close-docker-socket err (attach-socket identifier :stderr))
+       (in (attach-socket identifier :stdin))
+       (handle error (e) (close-docker-socket in) (error e))
+       (out (attach-socket identifier :stdout))
+       (handle error (e) (close-docker-socket out) (error e))
+       (err (attach-socket identifier :stderr))
+       (handle error (e) (close-docker-socket err) (error e))
        (yield (make-instance 
                'attached-container 
                :identifier identifier
