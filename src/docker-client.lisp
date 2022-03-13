@@ -13,6 +13,7 @@
            :stop-container :stdin-socket
            :host-config
            :docker-config
+           :make-docker-config
            :*default-docker-config*
            :pause-container :unpause-container
            :remove-container
@@ -46,8 +47,8 @@
    (http-body :reader http-body :initarg :http-body :initform nil)))
 
 (defclass docker-socket ()
-  ((docker-connection :reader socket-connection :initarg :docker-connection)
-   (docker-stream :reader docker-stream :initarg :docker-stream)))
+  ((docker-connection :accessor docker-connection :initarg :docker-connection)
+   (docker-stream :accessor docker-stream :initarg :docker-stream)))
 
 (defun connect-docker-socket (&key (element-type 'character))
   (handler-case (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
@@ -62,8 +63,11 @@
                     (error (e) (left (format nil "Error while connecting docker socket ~a" e)))))
     (error (e) (left (format nil "Error while constructing docker socket ~a" e)))))
 
-(defmethod close-docker-socket ((socket docker-socket))
-  (close (docker-stream socket)))
+(defmethod close-docker-socket ((socket docker-socket))  
+  (setf (docker-connection socket) nil)
+  (when (docker-stream socket)
+    (close (docker-stream socket))
+    (setf (docker-stream socket) nil)))
 
 (defun parse-status (status-line)
   (match status-line
@@ -100,17 +104,20 @@
                :http-body body))))
 
 (defclass frame-reader (sb-gray:fundamental-character-input-stream)
-  ((buffer :reader buffer :initform (make-array 2000000 :element-type 'character))
+  ((buffer :accessor buffer :initform (make-array 1000000 :element-type 'character))
    (read-pointer :accessor read-pointer :initform 0)
    (write-pointer :accessor write-pointer :initform 0)
-   (frame-stream :reader frame-stream :initarg :frame-stream)))
+   (frame-stream :accessor frame-stream :initarg :frame-stream)))
 
 (defmethod stream-element-type ((stream frame-reader))
   (stream-element-type (docker-stream (frame-stream stream))))
 
 (defmethod close ((stream frame-reader) &key abort)
-  (declare (ignore abort))
-  (close-docker-socket (frame-stream stream)))
+  (declare (ignore abort))  
+  (setf (buffer stream) nil)
+  (when (frame-stream stream)
+    (close-docker-socket (frame-stream stream))
+    (setf (frame-stream stream) nil)))
 
 (defmethod ensure-available ((stream frame-reader))
   (when (= (read-pointer stream) (write-pointer stream))
@@ -215,10 +222,12 @@
                       :request-uri (format nil "/v1.41/containers/~a/start" identifier))
                      (lambda (response)
                         (cond ((= (code (http-status response)) 500)
-                               (left (format nil "Error from docker daemon: 500 ~a" 
+                               (left (format nil "Error from docker daemon when starting container ~a: 500 ~a" 
+                                             identifier
                                              (reason-phrase (http-status response)))))
                               ((= (code (http-status response)) 404)
-                               (left (format nil "Container does not exist: 404 ~a"
+                               (left (format nil "Container ~a does not exist: 404 ~a"
+                                             identifier
                                              (reason-phrase (http-status response)))))
                               ((= (code (http-status response)) 304)
                                (right "Container already started"))
@@ -265,10 +274,12 @@
                       :request-uri (format nil "/v1.41/containers/~a/pause" identifier))
                      (lambda (response)
                        (cond ((= (code (http-status response)) 500)
-                              (left (format nil "Error from docker daemon: 500 ~a" 
+                              (left (format nil "Error from docker daemon while pausing container ~a: 500 ~a" 
+                                            identifier
                                             (reason-phrase (http-status response)))))
                              ((= (code (http-status response)) 404)
-                              (left (format nil "Container does not exist: 404 ~a"
+                              (left (format nil "Container ~a does not exist: 404 ~a"
+                                            identifier
                                             (reason-phrase (http-status response)))))
                              ((= (code (http-status response)) 204)
                               (right "Paused container"))
@@ -284,10 +295,12 @@
                       :request-uri (format nil "/v1.41/containers/~a/unpause" identifier))
                      (lambda (response)
                        (cond ((= (code (http-status response)) 500)
-                                 (left (format nil "Error from docker daemon: 500 ~a" 
+                                 (left (format nil "Error from docker daemon while unpausing container ~a: 500 ~a" 
+                                               identifier
                                                (reason-phrase (http-status response)))))
                                 ((= (code (http-status response)) 404)
-                                 (left (format nil "Container does not exist: 404 ~a"
+                                 (left (format nil "Container ~a does not exist: 404 ~a"
+                                               identifier
                                                (reason-phrase (http-status response)))))
                                 ((= (code (http-status response)) 204)
                                  (right "Unpaused container"))
@@ -303,10 +316,12 @@
                       :request-uri (format nil "/v1.41/containers/~a/stop?t=~a" identifier kill-wait))
                      (lambda (response)
                        (cond ((= (code (http-status response)) 500)
-                              (left (format nil "Error from docker daemon: 500 ~a" 
+                              (left (format nil "Error from docker daemon while stopping container ~a: 500 ~a" 
+                                            identifier
                                             (reason-phrase (http-status response)))))
                              ((= (code (http-status response)) 404)
-                              (left (format nil "Container does not exist: 404 ~a"
+                              (left (format nil "Container ~a does not exist: 404 ~a"
+                                            identifier
                                             (reason-phrase (http-status response)))))
                              ((= (code (http-status response)) 304)
                               (right "Container already stopped"))
@@ -345,7 +360,28 @@
                                   (entrypoint)
                                   (open-stdin)
                                   (volumes)
+                                  (memory)
+                                  (read-only-root-fs)
                                   (host-config host-config)) :pascal-case)
+
+(defun make-docker-config (image &key (command nil) 
+                                   (entrypoint nil)
+                                   (volumes nil)
+                                   (memory nil)
+                                   (open-stdin t)
+                                   (binds nil)
+                                   (read-only-root-fs t))
+  (make-instance 'docker-config :image image 
+                 :cmd command
+                 :entrypoint entrypoint
+                 :open-stdin open-stdin
+                 :volumes (alist-hash-table 
+                           (mapcar (lambda (volume) (cons volume
+                                                          (alist-hash-table 
+                                                           (list) :test 'equal))) volumes))
+                 :host-config (make-instance 'host-config :binds binds)
+                 :read-only-root-fs read-only-root-fs
+                 :memory memory))
 
 (defparameter *default-docker-config* (make-instance 'docker-config 
                                                      :image "ubuntu:21.04"
@@ -353,6 +389,7 @@
                                                      :entrypoint nil
                                                      :open-stdin t
                                                      :volumes nil
+                                                     :memory nil
                                                      :host-config nil))
 
 (defmethod create-container (identifier &key (docker-config *default-docker-config*))
