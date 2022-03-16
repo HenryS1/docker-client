@@ -361,6 +361,7 @@
                                   (open-stdin)
                                   (volumes)
                                   (memory)
+                                  (memory-swap)
                                   (read-only-root-fs)
                                   (host-config host-config)) :pascal-case)
 
@@ -368,6 +369,7 @@
                                    (entrypoint nil)
                                    (volumes nil)
                                    (memory nil)
+                                   (memory-swap nil)
                                    (open-stdin t)
                                    (binds nil)
                                    (read-only-root-fs t))
@@ -381,7 +383,8 @@
                                                            (list) :test 'equal))) volumes))
                  :host-config (make-instance 'host-config :binds binds)
                  :read-only-root-fs read-only-root-fs
-                 :memory memory))
+                 :memory memory
+                 :memory-swap memory-swap))
 
 (defparameter *default-docker-config* (make-instance 'docker-config 
                                                      :image "ubuntu:21.04"
