@@ -353,7 +353,7 @@
                                               (code (http-status response))
                                               (reason-phrase (http-status response)))))))))
 
-(define-json-model host-config ((binds () "Binds")))
+(define-json-model host-config ((binds) (readonly-rootfs)) :pascal-case)
 
 (define-json-model docker-config ((image) 
                                   (cmd)
@@ -362,7 +362,6 @@
                                   (volumes)
                                   (memory)
                                   (memory-swap)
-                                  (read-only-root-fs)
                                   (host-config host-config)) :pascal-case)
 
 (defun make-docker-config (image &key (command nil) 
@@ -372,7 +371,7 @@
                                    (memory-swap nil)
                                    (open-stdin t)
                                    (binds nil)
-                                   (read-only-root-fs t))
+                                   (readonly-rootfs))
   (make-instance 'docker-config :image image 
                  :cmd command
                  :entrypoint entrypoint
@@ -381,8 +380,8 @@
                            (mapcar (lambda (volume) (cons volume
                                                           (alist-hash-table 
                                                            (list) :test 'equal))) volumes))
-                 :host-config (make-instance 'host-config :binds binds)
-                 :read-only-root-fs read-only-root-fs
+                 :host-config (make-instance 'host-config :binds binds 
+                                             :readonly-rootfs readonly-rootfs)
                  :memory memory
                  :memory-swap memory-swap))
 
